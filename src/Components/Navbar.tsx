@@ -5,7 +5,8 @@
  * ---------------------------------------------------------------------
  * Responsive e-commerce navbar (grocery / daily-essentials style, à la
  * ghorerbazar.com) for Next.js App Router + Tailwind CSS.
- * Includes: Light/Dark theme toggle + 4-language switcher (bn/en/es/hi).
+ * Includes: Light/Dark theme toggle + 4-language switcher (bn/en/es/hi)
+ * and a live search dropdown backed by productApi.getAll.
  *
  * Setup:
  *  1. npm install lucide-react next-themes
@@ -26,15 +27,17 @@
  *       </html>
  *
  * Wire it up to your backend:
- *  - Search submit  -> GET  /api/products?search=<query>
- *  - Category click -> GET  /api/categories
- *  - Cart badge     -> from your cart context / GET /api/orders (draft)
- *  - Account link    -> GET  /api/auth/me
+ *  - Search dropdown -> GET /products?search=<query>&limit=6 (via productApi.getAll)
+ *  - Search submit    -> full results page /products?search=<query>
+ *  - Category click   -> GET  /api/categories
+ *  - Cart badge       -> from your cart context / GET /api/orders (draft)
+ *  - Account link      -> GET  /api/auth/me
  * ---------------------------------------------------------------------
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   Search,
   MapPin,
@@ -49,10 +52,14 @@ import {
   Sun,
   Moon,
   Globe,
+  ImageOff,
+  Loader2,
+  PackageSearch,
 } from "lucide-react";
 import { useTheme } from "./Themeprovider";
 import { useLanguage } from "./Languagecontext";
 import { LOCALES } from "./translations";
+import { productApi, Product } from "@/lib/api";
 
 interface Category {
   id: string;
@@ -62,7 +69,7 @@ interface Category {
 
 interface NavbarProps {
   cartCount?: number;
-  wishlistCount?: number;  
+  wishlistCount?: number;
   isLoggedIn?: boolean;
   deliveryArea?: string;
   hotline?: string;
@@ -78,6 +85,202 @@ const DEFAULT_CATEGORIES: Category[] = [
   { id: "6", name: "স্ন্যাকস ও পানীয়", slug: "snacks-drinks" },
 ];
 
+function useDebouncedValue<T>(value: T, delay: number) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(t);
+  }, [value, delay]);
+  return debounced;
+}
+
+/**
+ * Search input with a live results dropdown underneath it.
+ * Used for both the desktop (inline) and mobile (below navbar) search bars —
+ * each renders its own instance so their open/closed state doesn't collide.
+ */
+function SearchWithDropdown({
+  variant,
+  placeholder,
+  onNavigate,
+}: {
+  variant: "desktop" | "mobile";
+  placeholder: string;
+  onNavigate?: () => void;
+}) {
+  const router = useRouter();
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<Product[]>([]);
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const debouncedQuery = useDebouncedValue(query, 300);
+
+  useEffect(() => {
+    const trimmed = debouncedQuery.trim();
+    if (!trimmed) {
+      setResults([]);
+      setOpen(false);
+      setLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setLoading(true);
+    productApi
+      .getAll({ search: trimmed, limit: "6", sort: "newest" })
+      .then((res) => {
+        if (cancelled) return;
+        setResults(res.data ?? []);
+        setOpen(true);
+      })
+      .catch(() => {
+        if (!cancelled) setResults([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [debouncedQuery]);
+
+  // Close the dropdown on outside click / Escape
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    }
+    function handleEscape(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, []);
+
+  const goToResultsPage = (q: string) => {
+    setOpen(false);
+    router.push(`/products?search=${encodeURIComponent(q)}`);
+    onNavigate?.();
+  };
+
+  const goToProduct = (id: string) => {
+    setOpen(false);
+    setQuery("");
+    router.push(`/products/${id}`);
+    onNavigate?.();
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!query.trim()) return;
+    goToResultsPage(query.trim());
+  };
+
+  const wrapperClass =
+    variant === "desktop"
+      ? "relative mx-auto hidden max-w-xl flex-1 md:block"
+      : "relative px-4 pb-3 md:hidden";
+
+  return (
+    <div ref={containerRef} className={wrapperClass}>
+      <form onSubmit={handleSubmit}>
+        <div className="flex w-full items-center overflow-hidden rounded-md bg-white dark:bg-[#1F2937]">
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onFocus={() => {
+              if (results.length > 0) setOpen(true);
+            }}
+            placeholder={placeholder}
+            className="w-full bg-transparent px-4 py-2 text-sm text-[#1F2937] dark:text-[#E5E7EB] outline-none placeholder:text-gray-400 dark:placeholder:text-gray-500"
+          />
+          <button
+            type="submit"
+            className="flex h-full items-center bg-[#F4A300] px-4 py-2.5 text-[#1B4332] hover:bg-[#e39900] transition-colors"
+            aria-label="Search"
+          >
+            <Search size={18} />
+          </button>
+        </div>
+      </form>
+
+      {/* Live results dropdown */}
+      {open && (
+        <div className="absolute inset-x-0 top-full z-50 mt-1.5 overflow-hidden rounded-lg border border-[#DCEEE3] dark:border-[#374151] bg-white dark:bg-[#1F2937] shadow-xl">
+          {loading && (
+            <div className="flex items-center justify-center gap-2 px-4 py-6 text-sm text-gray-400">
+              <Loader2 size={16} className="animate-spin" />
+              খোঁজা হচ্ছে...
+            </div>
+          )}
+
+          {!loading && results.length === 0 && (
+            <div className="flex flex-col items-center gap-1.5 px-4 py-6 text-center">
+              <PackageSearch size={22} className="text-gray-300" />
+              <p className="text-sm text-gray-500 dark:text-gray-400">কোনো পণ্য পাওয়া যায়নি</p>
+            </div>
+          )}
+
+          {!loading && results.length > 0 && (
+            <>
+              <ul className="max-h-80 overflow-y-auto py-1">
+                {results.map((product) => (
+                  <li key={product.id}>
+                    <button
+                      onClick={() => goToProduct(product.id)}
+                      className="flex w-full items-center gap-3 px-4 py-2.5 text-left hover:bg-[#FAF9F5] dark:hover:bg-[#111827] transition-colors"
+                    >
+                      <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-md bg-gray-100 dark:bg-[#111827]">
+                        {product.imageUrl ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={product.imageUrl}
+                            alt={product.name}
+                            className="h-full w-full object-cover"
+                          />
+                        ) : (
+                          <ImageOff size={16} className="text-gray-300" />
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm text-[#1F2937] dark:text-[#E5E7EB]">
+                          {product.name}
+                        </p>
+                        <p className="text-xs font-medium text-[#1B4332] dark:text-[#F4A300]">
+                          ৳{product.price}
+                          {product.unit && (
+                            <span className="ml-1 font-normal text-gray-400">/{product.unit}</span>
+                          )}
+                        </p>
+                      </div>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              <button
+                onClick={() => goToResultsPage(query.trim())}
+                className="block w-full border-t border-[#F0EFEA] dark:border-[#374151] px-4 py-2.5 text-center text-sm font-medium text-[#1B4332] dark:text-[#F4A300] hover:bg-[#FAF9F5] dark:hover:bg-[#111827] transition-colors"
+              >
+                &quot;{query.trim()}&quot; এর সব ফলাফল দেখুন
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Navbar({
   cartCount = 0,
   wishlistCount = 0,
@@ -90,7 +293,6 @@ export default function Navbar({
   const [categoryOpen, setCategoryOpen] = useState(false);
   const [langOpen, setLangOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
-  const [query, setQuery] = useState("");
   const [mounted, setMounted] = useState(false);
 
   const { theme, setTheme } = useTheme();
@@ -103,12 +305,6 @@ export default function Navbar({
     window.addEventListener("scroll", onScroll);
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
-
-  const handleSearchSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!query.trim()) return;
-    window.location.href = `/products?search=${encodeURIComponent(query.trim())}`;
-  };
 
   const currentLocale = LOCALES.find((l) => l.code === locale) ?? LOCALES[0];
 
@@ -186,25 +382,8 @@ export default function Navbar({
             )}
           </div>
 
-          {/* Search bar */}
-          <form onSubmit={handleSearchSubmit} className="mx-auto hidden max-w-xl flex-1 md:flex">
-            <div className="flex w-full items-center overflow-hidden rounded-md bg-white dark:bg-[#1F2937]">
-              <input
-                type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder={t("searchPlaceholder")}
-                className="w-full bg-transparent px-4 py-2 text-sm text-[#1F2937] dark:text-[#E5E7EB] outline-none placeholder:text-gray-400 dark:placeholder:text-gray-500"
-              />
-              <button
-                type="submit"
-                className="flex h-full items-center bg-[#F4A300] px-4 py-2.5 text-[#1B4332] hover:bg-[#e39900] transition-colors"
-                aria-label="Search"
-              >
-                <Search size={18} />
-              </button>
-            </div>
-          </form>
+          {/* Search bar (desktop) with live dropdown */}
+          <SearchWithDropdown variant="desktop" placeholder={t("searchPlaceholder")} />
 
           {/* Right icons */}
           <div className="ml-auto flex items-center gap-3 text-white md:ml-0 md:gap-4">
@@ -280,21 +459,8 @@ export default function Navbar({
           </div>
         </div>
 
-        {/* Mobile search */}
-        <form onSubmit={handleSearchSubmit} className="px-4 pb-3 md:hidden">
-          <div className="flex items-center overflow-hidden rounded-md bg-white dark:bg-[#1F2937]">
-            <input
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder={t("searchPlaceholder")}
-              className="w-full bg-transparent px-4 py-2 text-sm text-[#1F2937] dark:text-[#E5E7EB] outline-none placeholder:text-gray-400 dark:placeholder:text-gray-500"
-            />
-            <button type="submit" className="flex items-center bg-[#F4A300] px-4 py-2.5 text-[#1B4332]">
-              <Search size={18} />
-            </button>
-          </div>
-        </form>
+        {/* Search bar (mobile) with live dropdown */}
+        <SearchWithDropdown variant="mobile" placeholder={t("searchPlaceholder")} />
       </div>
 
       {/* Mobile menu panel */}

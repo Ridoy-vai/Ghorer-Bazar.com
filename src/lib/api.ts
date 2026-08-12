@@ -24,7 +24,18 @@ export class ApiRequestError extends Error {
   }
 }
 
+// Unwraps `data` only — use for endpoints that just return { success, message, data }.
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const json = await requestRaw<T>(path, options);
+  return json.data;
+}
+
+// Returns the full JSON body — use for endpoints that also send extra top-level
+// fields like `meta` (pagination) or `filters` (facets), e.g. the products list.
+async function requestRaw<T>(
+  path: string,
+  options: RequestInit = {}
+): Promise<ApiResponseShape<T> & Record<string, any>> {
   const token = typeof window !== "undefined" ? window.localStorage.getItem("accessToken") : null;
 
   const res = await fetch(`${API_BASE_URL}${path}`, {
@@ -36,13 +47,13 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     },
   });
 
-  const json: ApiResponseShape<T> = await res.json();
+  const json: ApiResponseShape<T> & Record<string, any> = await res.json();
 
   if (!res.ok || !json.success) {
     throw new ApiRequestError(json.message || "Request failed", res.status);
   }
 
-  return json.data;
+  return json;
 }
 
 export const api = {
@@ -106,32 +117,87 @@ export const session = {
 // model Product {
 //   id          String   @id @default(uuid())
 //   name        String
+//   category    String?
 //   description String?
 //   price       Float
+//   unit        String   @default("piece")
 //   stock       Int      @default(0)
 //   imageUrl    String?
+//   createdAt   DateTime @default(now())
+//   updatedAt   DateTime @updatedAt
 // }
 
 export interface Product {
   id: string;
   name: string;
+  category?: string | null;
   description?: string | null;
   price: number;
+  unit?: string | null;
   stock: number;
   imageUrl?: string | null;
+  // Only present when GET /products?sort=topSelling is used.
+  soldCount?: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface CreateProductPayload {
   name: string;
+  category?: string;
   description?: string;
   price: number;
+  unit?: string;
   stock: number;
   imageUrl?: string;
 }
 
+export interface ProductListMeta {
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
+}
+
+export interface ProductListFilters {
+  priceRange: { min: number; max: number };
+  categories: { category: string | null; count: number }[];
+}
+
+export interface ProductListResponse {
+  success: boolean;
+  message: string;
+  data: Product[];
+  meta: ProductListMeta;
+  filters: ProductListFilters;
+}
+
+// Query params supported by GET /products (all optional):
+//   category, unit, search, minPrice, maxPrice, inStock,
+//   sort (newest | oldest | priceLowHigh | priceHighLow | topSelling | nameAZ | nameZA),
+//   page, limit
+export type ProductQueryParams = Partial<{
+  category: string;
+  unit: string;
+  search: string;
+  minPrice: string;
+  maxPrice: string;
+  inStock: string;
+  sort: string;
+  page: string;
+  limit: string;
+}>;
+
 export const productApi = {
   create: (payload: CreateProductPayload) => api.post<Product>("/products", payload),
-  getAll: () => api.get<Product[]>("/products"),
+  getAll: (params?: ProductQueryParams) => {
+    const query = params
+      ? `?${new URLSearchParams(params as Record<string, string>).toString()}`
+      : "";
+    return requestRaw<Product[]>(`/products${query}`, { method: "GET" }) as Promise<ProductListResponse>;
+  },
   getById: (id: string) => api.get<Product>(`/products/${id}`),
+  update: (id: string, payload: Partial<CreateProductPayload>) =>
+    api.patch<Product>(`/products/${id}`, payload),
   delete: (id: string) => api.delete<Product>(`/products/${id}`),
 };
