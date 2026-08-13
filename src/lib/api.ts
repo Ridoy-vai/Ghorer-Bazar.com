@@ -201,3 +201,57 @@ export const productApi = {
     api.patch<Product>(`/products/${id}`, payload),
   delete: (id: string) => api.delete<Product>(`/products/${id}`),
 };
+
+// ---------------- Cart ----------------
+// Matches a cart.routes.ts mounted at app.use("/cart", cartRoutes), protected by
+// your existing auth middleware — the cart belongs to whoever `accessToken` in
+// localStorage identifies (see `request()` above, which attaches it automatically).
+//
+// model Cart {
+//   id        String     @id @default(uuid())
+//   userId    String     @unique
+//   user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+//   items     CartItem[]
+//   createdAt DateTime   @default(now())
+//   updatedAt DateTime   @updatedAt
+// }
+// model CartItem {
+//   id        String   @id @default(uuid())
+//   cartId    String
+//   cart      Cart     @relation(fields: [cartId], references: [id], onDelete: Cascade)
+//   productId String
+//   product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+//   quantity  Int      @default(1)
+//   createdAt DateTime @default(now())
+//   updatedAt DateTime @updatedAt
+//   @@unique([cartId, productId])
+// }
+//
+// NOTE: since the cart is tied to a logged-in user, every cartApi call below
+// requires the person to be logged in (accessToken present) — same as any other
+// authenticated endpoint in this file. A 401 surfaces as an ApiRequestError.
+
+export interface CartItem {
+  id: string;
+  productId: string;
+  quantity: number;
+  product: Product;
+  subtotal: number;
+}
+
+export interface Cart {
+  id: string;
+  items: CartItem[];
+  totalItems: number;
+  totalPrice: number;
+}
+
+export const cartApi = {
+  get: () => api.get<Cart>("/cart"),
+  addItem: (productId: string, quantity: number = 1) =>
+    api.post<Cart>("/cart/items", { productId, quantity }),
+  updateItem: (productId: string, quantity: number) =>
+    api.patch<Cart>(`/cart/items/${productId}`, { quantity }),
+  removeItem: (productId: string) => api.delete<Cart>(`/cart/items/${productId}`),
+  clear: () => api.delete<Cart>("/cart"),
+};

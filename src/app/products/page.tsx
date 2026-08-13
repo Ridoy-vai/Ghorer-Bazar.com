@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
-import { productApi } from "@/lib/api";
+import { productApi, cartApi, ApiRequestError, type Cart } from "@/lib/api";
 import {
   ImageOff,
   PackageSearch,
@@ -75,6 +75,8 @@ type ApiFacets = {
   priceRange: { min: number; max: number };
   categories: { category: string | null; count: number }[];
 };
+
+type CartItem = Cart["items"][number];
 
 function useDebouncedValue<T>(value: T, delay: number) {
   const [debounced, setDebounced] = useState(value);
@@ -185,6 +187,67 @@ export default function ProductsPage() {
   const debouncedSearch = useDebouncedValue(search, 400);
   const debouncedMinPrice = useDebouncedValue(minPrice, 400);
   const debouncedMaxPrice = useDebouncedValue(maxPrice, 400);
+
+  // ---- cart state ------------------------------------------------
+  // productId -> quantity currently in the cart
+  const [cartQuantities, setCartQuantities] = useState<Record<string, number>>({});
+  // productId currently mid-request, so its button can show a spinner / be disabled
+  const [pendingProductId, setPendingProductId] = useState<string | null>(null);
+  const [cartError, setCartError] = useState<string | null>(null);
+
+  const applyCartItems = (items: CartItem[]) => {
+    const map: Record<string, number> = {};
+    items.forEach((i) => {
+      map[i.productId] = i.quantity;
+    });
+    setCartQuantities(map);
+  };
+
+  // load the existing cart once on mount so buttons reflect real state.
+  // Requires login (accessToken in localStorage) — if the person isn't logged
+  // in, this quietly fails and the cart just starts empty; the "add" handler
+  // below will surface the real error once they try to add something.
+  useEffect(() => {
+    cartApi
+      .get()
+      .then((cart) => applyCartItems(cart.items))
+      .catch(() => {
+        // not logged in yet, or a transient error — cart stays empty
+      });
+  }, []);
+
+  const handleAddToCart = async (product: ApiProduct) => {
+    if (product.stock <= 0 || pendingProductId) return;
+    setCartError(null);
+    setPendingProductId(product.id);
+    try {
+      const cart = await cartApi.addItem(product.id, 1);
+      applyCartItems(cart.items);
+    } catch (err) {
+      if (err instanceof ApiRequestError && err.status === 401) {
+        setCartError("কার্টে যোগ করতে হলে আগে লগইন করুন");
+      } else {
+        setCartError(err instanceof Error ? err.message : "কার্টে যোগ করা যায়নি");
+      }
+    } finally {
+      setPendingProductId(null);
+    }
+  };
+
+  const handleChangeQuantity = async (product: ApiProduct, nextQty: number) => {
+    if (pendingProductId) return;
+    setCartError(null);
+    setPendingProductId(product.id);
+    try {
+      const cart = await cartApi.updateItem(product.id, nextQty);
+      applyCartItems(cart.items);
+    } catch (err) {
+      setCartError(err instanceof Error ? err.message : "কার্ট আপডেট করা যায়নি");
+    } finally {
+      setPendingProductId(null);
+    }
+  };
+  // ------------------------------------------------------------------
 
   // Tracks the query string we ourselves last wrote via router.replace, so the
   // sync-from-URL effect below can tell "URL changed because we wrote it" apart
@@ -310,6 +373,14 @@ export default function ProductsPage() {
           </div>
         </div>
       </div>
+
+      {cartError && (
+        <div className="mx-auto mt-4 max-w-6xl px-4">
+          <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-600">
+            {cartError}
+          </div>
+        </div>
+      )}
 
       <div className="mx-auto max-w-6xl px-4 py-6">
         <div className="grid gap-6 lg:grid-cols-[270px_1fr]">
@@ -498,6 +569,9 @@ export default function ProductsPage() {
                       typeof product.soldCount === "number" &&
                       product.soldCount > 0;
 
+                    const qtyInCart = cartQuantities[product.id] ?? 0;
+                    const isPending = pendingProductId === product.id;
+
                     return (
                       <div
                         key={product.id}
@@ -551,13 +625,38 @@ export default function ProductsPage() {
                             )}
                           </div>
 
-                          <button
-                            disabled={outOfStock}
-                            className="mt-3 flex w-full items-center justify-center gap-2 rounded-md border border-orange-500 py-2 text-sm font-medium text-orange-600 transition hover:bg-orange-500 hover:text-white disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-300 disabled:hover:bg-transparent"
-                          >
-                            <ShoppingCart size={15} />
-                            কার্টে যোগ করুন
-                          </button>
+                          {qtyInCart > 0 ? (
+                            <div className="mt-3 flex w-full items-center justify-between rounded-md border border-orange-500 py-1">
+                              <button
+                                onClick={() => handleChangeQuantity(product, qtyInCart - 1)}
+                                disabled={isPending}
+                                className="flex h-7 w-9 items-center justify-center text-orange-600 disabled:opacity-40"
+                                aria-label="কমান"
+                              >
+                                <Minus size={14} />
+                              </button>
+                              <span className="text-sm font-semibold text-slate-800">
+                                {qtyInCart}
+                              </span>
+                              <button
+                                onClick={() => handleChangeQuantity(product, qtyInCart + 1)}
+                                disabled={isPending || qtyInCart >= product.stock}
+                                className="flex h-7 w-9 items-center justify-center text-orange-600 disabled:opacity-40"
+                                aria-label="বাড়ান"
+                              >
+                                <Plus size={14} />
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => handleAddToCart(product)}
+                              disabled={outOfStock || isPending}
+                              className="mt-3 flex w-full items-center justify-center gap-2 rounded-md border border-orange-500 py-2 text-sm font-medium text-orange-600 transition hover:bg-orange-500 hover:text-white disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-300 disabled:hover:bg-transparent"
+                            >
+                              <ShoppingCart size={15} />
+                              {isPending ? "যোগ হচ্ছে..." : "কার্টে যোগ করুন"}
+                            </button>
+                          )}
                         </div>
                       </div>
                     );
